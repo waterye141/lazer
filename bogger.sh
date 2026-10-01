@@ -40,18 +40,18 @@ resolve_log_file() {
 }
 
 stats_summary() {
-	local count; count=$2
-	echo -e "\nTop $count IP addresses with the most requests:"
-	awk '{print $1}' "$LOG_FILE" | sort | uniq -c | sort -nr | awk '{printf "%s - %d Requests\n", $2, $1}' | head -n "$count"
+	local COUNT; COUNT=$2
+	echo -e "\nTop $COUNT IP addresses with the most requests:"
+	awk '{print $1}' "$LOG_FILE" | sort | uniq -c | sort -nr | awk '{printf "%s - %d Requests\n", $2, $1}' | head -n "$COUNT"
 
-	echo -e "\nTop $count most requested paths:"
-	awk '{print $7}' "$LOG_FILE" | sort | uniq -c | sort -nr | awk '{printf "%s - %d Requests\n", $2, $1}' | head -n "$count"
+	echo -e "\nTop $COUNT most requested paths:"
+	awk '{print $7}' "$LOG_FILE" | sort | uniq -c | sort -nr | awk '{printf "%s - %d Requests\n", $2, $1}' | head -n "$COUNT"
 
-	echo -e "\nTop $count response status codes:"
-	grep -oE ' [0-9][0-9][0-9] ' "$LOG_FILE" | sort | uniq -c | sort -nr | head -n "$count" | awk '{printf "%s - %d Requests\n", $2, $1}'
+	echo -e "\nTop $COUNT response status codes:"
+	grep -oE ' [0-9][0-9][0-9] ' "$LOG_FILE" | sort | uniq -c | sort -nr | head -n "$COUNT" | awk '{printf "%s - %d Requests\n", $2, $1}'
 
-	echo -e "\nTop $count user agents:"
-	awk -F'"' '{print $6}' "$LOG_FILE" | sort | uniq -c | sort -nr | head -n "$count" | awk '{for(i=2;i<=NF;i++) printf "%s ", $i; print "-",$1,"requests" }'
+	echo -e "\nTop $COUNT user agents:"
+	awk -F'"' '{print $6}' "$LOG_FILE" | sort | uniq -c | sort -nr | head -n "$COUNT" | awk '{for(i=2;i<=NF;i++) printf "%s ", $i; print "-",$1,"requests" }'
 	printf "\n"
 
 }
@@ -61,31 +61,43 @@ json_escape() { sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' ; }
 display() {
 	resolve_log_file 
 	echo "How many lines do you want to display?:"
-	read -r count;
-	stats_summary "$count"
+	read -r COUNT;
 	clear
+	stats_summary "$LOG_FILE" "$COUNT"
 
 }
 
+extract_content() {
+	grep -o '"content":"\(\\.\|[^"\\]\)*"' | head -n 1
+}
+
 analyse() {
-	curl https://openrouter.ai/api/v1/chat/completions \
-	  -H "Content-Type: application/json" \
-	  -H "Authorization: Bearer $OPENROUTER_API_KEY" \
-	  -d '{
-	  "model": "qwen/qwen3.8-27b",
-	  "messages": [
-		{
-		  "role" : "system",
-		  "content" : "You are required to analyze the log files for anomalies and reply by your findings."
-		}
-		{
-		  "role": "user",
-		  "content" : "'"$(printf 'Nginx summary for %s:\n%s\n\nLast 30 raw lines:\n%s\n\nTask: list anomalies.' "$LOG_FILE" "$(stats_summary "$LOG_FILE" 10 | json_escape)" "$(tail -n 30 "$LOG_FILE" | json_escape)")"'"
-		}
-	  ],
-	  "temperature" : 0.2,
-	  "max_tokens" : 1000
-	}'
+	resolve_log_file
+	clear
+	sleep 1
+	local response; response=$(	curl -sS https://openrouter.ai/api/v1/chat/completions \
+		  -H "Content-Type: application/json" \
+		  -H "Authorization: Bearer $OPENROUTER_API_KEY" \
+		  -d '{
+		  "model": "nvidia/nemotron-3.5-lightning",
+		  "messages": [
+			{
+			  "role" : "system",
+			  "content" : "You are required to analyze the log files for anomalies and reply by your findings. Reply in one coherent paragraph"
+			},
+			{
+			  "role": "user",
+			  "content" : "'"$(printf 'Nginx summary for %s:\n%s\n\nLast 30 raw lines:\n%s\n\nTask: list anomalies.' "$LOG_FILE" "$(stats_summary "$LOG_FILE" 10 | json_escape)" "$(tail -n 30 "$LOG_FILE" | json_escape)")"'"
+			}
+		  ],
+		  "temperature" : 0.2,
+		  "max_tokens" : 6000
+		}'
+	)
+	local final_response; final_response=$(echo "$response" | extract_content |  sed 's/^"content":"//; s/"$//')
+	if [[ -z $final_response ]]; then echo "Error, sending request."; fi
+	echo "$final_response"
+	
 }
 
 setup() {
@@ -121,10 +133,10 @@ welcome() {
 		setup
 		;;
 		2)
-		display "$LOG_FILE"
+		display
 		;;
 		3)
-		analyse "$LOG_FILE"
+		analyse
 		;;
 		4)
 		install_systemd_service

@@ -7,11 +7,12 @@ A small bash utility that analyzes Nginx access logs and identifies anomalies
 ## Usage
 
 ``` bash
-./bogger <NGINX_LOGFILE>
+./bogger.sh <NGINX_LOGFILE>
 ```
 The script will fail to run if the file is not a valid Nginx access log file. You can change `NGINX_LOGFILE` variable inside of the script to match the one you are using on your nginx server.
 
+You can use you own API key by renaming the `.env.example` to `.env` and simply adding it to the file.
+
 ## TODO
-- Add a simple AI analysis and summary
 - Notify user on anomalies and issues
 - Add systemd service to check at specified intervals and email the user
