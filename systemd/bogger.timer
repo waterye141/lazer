@@ -1,0 +1,11 @@
+[Unit]
+Description=Run Bogger Nginx anomaly analysis hourly
+
+[Timer]
+OnCalendar=hourly
+Persistent=true
+Unit=bogger.service
+
+[Install]
+WantedBy=timers.target
+

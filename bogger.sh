@@ -1,8 +1,25 @@
 #!/bin/bash
 set -e
 
-LOG_FILE=$1
-OPENROUTER_API_KEY=$(cat .env)
+OPENROUTER_API_KEY=${OPENROUTER_API_KEY:-}
+NONINTERACTIVE=0
+SERVICE_ENV_FILE=${BOGGER_ENV_FILE:-/etc/bogger/bogger.env}
+SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+if [[ "${1:-}" == "--service" ]]; then
+  NONINTERACTIVE=1
+  shift
+fi
+LOG_FILE=${1:-${LOG_FILE:-}}
+
+load_configuration() {
+  if [[ -z "$OPENROUTER_API_KEY" && -f .env ]]; then
+    OPENROUTER_API_KEY=$(cat .env)
+  fi
+
+  if [[ -f "$SERVICE_ENV_FILE" ]]; then
+    source "$SERVICE_ENV_FILE"
+  fi
+}
 
 resolve_log_file() {
   if [[ -z "$LOG_FILE" ]]; then
@@ -16,6 +33,10 @@ resolve_log_file() {
   fi
 
   if [[ ! -f "$LOG_FILE" ]]; then
+    if ((NONINTERACTIVE)); then
+      echo "Error: unable to resolve an access log in non-interactive mode" >&2
+      exit 1
+    fi
     echo $'\n'$"Log file not found, please provide the log file path: "
     read -r LOG_FILE
   fi
@@ -58,8 +79,6 @@ stats_summary() {
 
 }
 
-json_escape() { sed -e 's/\\/\\\\/g' -e 's/"/\\"/g'; }
-
 display() {
   resolve_log_file
   echo "How many lines do you want to display?:"
@@ -70,52 +89,127 @@ display() {
 }
 
 extract_content() {
-  grep -o '"content":"\(\\.\|[^"\\]\)*"' | head -n 1
+  jq -r '.choices[0].message.content // empty'
+}
+
+request_analysis() {
+  resolve_log_file
+  local response
+  local summary
+  local recent_lines
+  summary=$(stats_summary "$LOG_FILE" 10)
+  recent_lines=$(tail -n 30 "$LOG_FILE")
+  response=$(
+    curl -sS https://openrouter.ai/api/v1/chat/completions \
+      -H "Content-Type: application/json" \
+      -H "Authorization: Bearer $OPENROUTER_API_KEY" \
+      -d "$(jq -n \
+        --arg model "nvidia/nemotron-3.5-lightning" \
+        --arg system "Analyze the Nginx access log for anomalies. Return only valid JSON with this schema: {\"anomaly\": boolean, \"findings\": string}. Set anomaly to true only when the log contains a meaningful anomaly." \
+        --arg user "Nginx summary for $LOG_FILE:\n$summary\n\nLast 30 raw lines:\n$recent_lines\n\nTask: identify anomalies." \
+        '{model: $model, messages: [{role: "system", content: $system}, {role: "user", content: $user}], temperature: 0.2, max_tokens: 6000}')"
+  )
+  local content
+  content=$(printf '%s' "$response" | extract_content)
+  if [[ -z "$content" ]]; then
+    echo "Error: OpenRouter returned no analysis content" >&2
+    return 1
+  fi
+  printf '%s' "$content"
 }
 
 analyse() {
   resolve_log_file
   clear
   sleep 1
-  local response
-  response=$(
-    curl -sS https://openrouter.ai/api/v1/chat/completions \
-      -H "Content-Type: application/json" \
-      -H "Authorization: Bearer $OPENROUTER_API_KEY" \
-      -d '{
-		  "model": "nvidia/nemotron-3.5-lightning",
-		  "messages": [
-			{
-			  "role" : "system",
-			  "content" : "You are required to analyze the log files for anomalies and reply by your findings. Reply in one coherent paragraph"
-			},
-			{
-			  "role": "user",
-			  "content" : "'"$(printf 'Nginx summary for %s:\n%s\n\nLast 30 raw lines:\n%s\n\nTask: list anomalies.' "$LOG_FILE" "$(stats_summary "$LOG_FILE" 10 | json_escape)" "$(tail -n 30 "$LOG_FILE" | json_escape)")"'"
-			}
-		  ],
-		  "temperature" : 0.2,
-		  "max_tokens" : 6000
-		}'
-  )
   local final_response
-  final_response=$(echo "$response" | extract_content | sed 's/^"content":"//; s/"$//')
-  if [[ -z $final_response ]]; then echo "Error, sending request."; fi
-  echo "$final_response"
+  final_response=$(request_analysis) || {
+    echo "Error, sending request." >&2
+    return 1
+  }
+  if ! printf '%s' "$final_response" | jq empty >/dev/null 2>&1; then
+    echo "Error: analysis response was not valid JSON" >&2
+    return 1
+  fi
+  printf '%s\n' "$final_response" | jq -r '.findings // empty'
+}
 
+send_notification() {
+  local findings=$1
+  local host_name=${HOSTNAME:-}
+  if [[ -z "$host_name" ]]; then
+    host_name=$(hostname 2>/dev/null || printf 'unknown-host')
+  fi
+  if [[ -z "${BOGGER_EMAIL_RECIPIENT:-}" ]]; then
+    echo "Error: BOGGER_EMAIL_RECIPIENT is not configured" >&2
+    return 1
+  fi
+  if [[ -z "${BOGGER_MAIL_COMMAND:-}" ]]; then
+    echo "Error: BOGGER_MAIL_COMMAND is not configured" >&2
+    return 1
+  fi
+  printf '%s\n' "$findings" | "$BOGGER_MAIL_COMMAND" \
+    -s "Bogger anomaly detected on $host_name" "$BOGGER_EMAIL_RECIPIENT"
+}
+
+service_analysis() {
+  NONINTERACTIVE=1
+  if [[ -z "$OPENROUTER_API_KEY" ]]; then
+    echo "Error: OPENROUTER_API_KEY is not configured" >&2
+    return 1
+  fi
+  local result
+  result=$(request_analysis) || return 1
+  if ! printf '%s' "$result" | jq -e 'type == "object" and (.anomaly | type == "boolean") and (.findings | type == "string")' >/dev/null 2>&1; then
+    echo "Error: analysis response did not match the required schema" >&2
+    return 1
+  fi
+  if [[ "$(printf '%s' "$result" | jq -r '.anomaly')" == "true" ]]; then
+    local findings
+    findings=$(printf '%s' "$result" | jq -r '.findings')
+    echo "Anomaly detected: $findings"
+    send_notification "$findings"
+  else
+    echo "No anomaly detected"
+  fi
 }
 
 setup() {
-  sudo cp bogger.sh /usr/bin/bogger
+  sudo mkdir -p /usr/share/bogger/systemd
+  sudo cp "$SCRIPT_DIR/bogger.sh" /usr/bin/bogger
+  sudo cp "$SCRIPT_DIR/systemd/bogger.service" "$SCRIPT_DIR/systemd/bogger.timer" "$SCRIPT_DIR/systemd/bogger.env.example" /usr/share/bogger/systemd/
 }
 
 remove() {
+  if [[ -f /etc/systemd/system/bogger.timer ]]; then
+    sudo systemctl disable --now bogger.timer || true
+  fi
+  sudo rm -f /etc/systemd/system/bogger.timer /etc/systemd/system/bogger.service
+  sudo systemctl daemon-reload
   sudo rm /usr/bin/bogger
+  sudo rm -rf /usr/share/bogger
 }
 
 install_systemd_service() {
-  # TODO: Add systemd service
-  true
+  local unit_source_dir="$SCRIPT_DIR/systemd"
+  if [[ ! -d "$unit_source_dir" ]]; then
+    unit_source_dir="/usr/share/bogger/systemd"
+  fi
+  if [[ ! -d "$unit_source_dir" ]]; then
+    echo "Error: systemd templates are not available at '$unit_source_dir'" >&2
+    return 1
+  fi
+  sudo mkdir -p /etc/bogger
+  sudo cp "$SCRIPT_DIR/bogger.sh" /usr/bin/bogger
+  sudo cp "$unit_source_dir/bogger.service" /etc/systemd/system/bogger.service
+  sudo cp "$unit_source_dir/bogger.timer" /etc/systemd/system/bogger.timer
+  if [[ ! -f /etc/bogger/bogger.env ]]; then
+    sudo cp "$unit_source_dir/bogger.env.example" /etc/bogger/bogger.env
+    sudo chmod 600 /etc/bogger/bogger.env
+    echo "Edit /etc/bogger/bogger.env before starting the timer."
+  fi
+  sudo systemctl daemon-reload
+  sudo systemctl enable --now bogger.timer
 }
 
 welcome() {
@@ -134,7 +228,7 @@ welcome() {
   echo "1 - Install bogger to PATH"
   echo "2 - Raw analysis"
   echo "3 - Get a summary regarding the logs read"
-  echo "4 - Install systmd service to notify on anomalies"
+  echo "4 - Install systemd service to notify on anomalies"
   echo "5 - Remove bogger from your system"
   read -r selection
   case $selection in
@@ -161,5 +255,12 @@ welcome() {
     ;;
   esac
 }
+
+load_configuration
+
+if ((NONINTERACTIVE)); then
+  service_analysis
+  exit $?
+fi
 
 welcome

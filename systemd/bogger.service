@@ -1,0 +1,13 @@
+[Unit]
+Description=Bogger Nginx anomaly analysis
+After=network-online.target nginx.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/bogger --service
+EnvironmentFile=-/etc/bogger/bogger.env
+WorkingDirectory=/etc/bogger
+StandardOutput=journal
+StandardError=journal
+
