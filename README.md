@@ -13,7 +13,15 @@ The script will fail to run if the file is not a valid Nginx access log file. Yo
 
 You can use you own API key by renaming the `.env.example` to `.env` and simply adding it to the file.
 
-Currently only supports OpenRouter and Groq models.
+Bogger accepts explicit source selection for `nginx`, `apache`, `ssh`, `systemd_journal`, `haproxy`, `docker`, and `generic` logs:
+
+```bash
+./bogger.sh --source apache --file /var/log/httpd/access_log
+./bogger.sh --source ssh --file /var/log/auth.log
+./bogger.sh --source systemd_journal --unit ssh.service --since today
+```
+
+The report keeps the original Nginx categories—top client IPs, requested paths or targets, response status codes, and user agents. Parsers populate equivalent fields when the source provides them and show `N/A` when a category is not present in that log format.
 
 ## Systemd service
 

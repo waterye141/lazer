@@ -10,11 +10,24 @@ GROQ_API_URL=${GROQ_API_URL:-https://api.groq.com/openai/v1/chat/completions}
 NONINTERACTIVE=0
 SERVICE_ENV_FILE=${BOGGER_ENV_FILE:-/etc/bogger/bogger.env}
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+SOURCE_TYPE=${BOGGER_SOURCE:-nginx}
+INPUT_FILE=${BOGGER_INPUT_FILE:-}
+JOURNALCTL_ARGS=${BOGGER_JOURNALCTL_ARGS:-}
+RECORDS_FILE=
+CLI_SOURCE=
+CLI_INPUT_FILE=
+PARSER_FILE="$SCRIPT_DIR/parsers.sh"
+[[ -f "$PARSER_FILE" ]] || PARSER_FILE="/usr/share/bogger/parsers.sh"
+# shellcheck disable=SC1090
+source "$PARSER_FILE"
 if [[ "${1:-}" == "--service" ]]; then
   NONINTERACTIVE=1
   shift
 fi
-LOG_FILE=${1:-${LOG_FILE:-}}
+if [[ -n "${1:-}" && "${1:0:2}" != "--" ]]; then
+  CLI_INPUT_FILE=$1
+  shift
+fi
 
 load_configuration() {
   if [[ -z "$OPENROUTER_API_KEY" && -f .env ]]; then
@@ -24,72 +37,168 @@ load_configuration() {
   if [[ -f "$SERVICE_ENV_FILE" ]]; then
     source "$SERVICE_ENV_FILE"
   fi
+  SOURCE_TYPE=${BOGGER_SOURCE:-$SOURCE_TYPE}
+  INPUT_FILE=${BOGGER_INPUT_FILE:-${LOG_FILE:-$INPUT_FILE}}
 }
 
-resolve_log_file() {
-  if [[ -z "$LOG_FILE" ]]; then
-    LOG_FILE=$(sudo nginx -T 2>/dev/null |
+parse_cli_arguments() {
+  while (($#)); do
+    case "$1" in
+    --source)
+      CLI_SOURCE=${2:-}
+      shift 2
+      ;;
+    --file)
+      CLI_INPUT_FILE=${2:-}
+      shift 2
+      ;;
+    --unit)
+      JOURNALCTL_ARGS+=" -u ${2:-}"
+      shift 2
+      ;;
+    --since)
+      JOURNALCTL_ARGS+=" --since ${2:-}"
+      shift 2
+      ;;
+    --until)
+      JOURNALCTL_ARGS+=" --until ${2:-}"
+      shift 2
+      ;;
+    --help)
+      cat <<'EOF'
+Usage: bogger.sh [--service] [--source SOURCE] [--file PATH]
+
+Sources: nginx, apache, ssh, systemd_journal, haproxy, docker, generic
+Journal options: --unit UNIT, --since TIME, --until TIME
+EOF
+      exit 0
+      ;;
+    *)
+      echo "Error: unknown argument '$1'" >&2
+      return 1
+      ;;
+    esac
+  done
+  if [[ -n "$CLI_SOURCE" ]]; then
+    SOURCE_TYPE=$CLI_SOURCE
+  fi
+  if [[ -n "$CLI_INPUT_FILE" ]]; then
+    INPUT_FILE=$CLI_INPUT_FILE
+  fi
+}
+
+resolve_input() {
+  if [[ "$SOURCE_TYPE" == nginx && -z "$INPUT_FILE" ]]; then
+    INPUT_FILE=$(sudo nginx -T 2>/dev/null |
       grep -oP '(?<=access_log\s)\S+' |
       head -1)
   fi
 
-  if [[ -z "$LOG_FILE" ]]; then
-    LOG_FILE="/var/log/nginx/access.log"
+  if [[ "$SOURCE_TYPE" == nginx && -z "$INPUT_FILE" ]]; then
+    INPUT_FILE="/var/log/nginx/access.log"
   fi
 
-  if [[ ! -f "$LOG_FILE" ]]; then
+  if [[ "$SOURCE_TYPE" == systemd_journal ]]; then
+    return 0
+  fi
+
+  if [[ ! -f "$INPUT_FILE" ]]; then
     if ((NONINTERACTIVE)); then
-      echo "Error: unable to resolve an access log in non-interactive mode" >&2
+      echo "Error: unable to resolve a '$SOURCE_TYPE' log in non-interactive mode" >&2
       exit 1
     fi
-    echo $'\n'$"Log file not found, please provide the log file path: "
-    read -r LOG_FILE
+    echo $'\n'"Log file not found, please provide the $SOURCE_TYPE log file path: "
+    read -r INPUT_FILE
   fi
 
-  if [[ ! -f "$LOG_FILE" ]]; then
-    echo "Error: access log not found at '$LOG_FILE'" >&2
-    echo "Usage: $0 /path/to/access.log" >&2
+  if [[ ! -f "$INPUT_FILE" ]]; then
+    echo "Error: $SOURCE_TYPE log not found at '$INPUT_FILE'" >&2
+    echo "Usage: $0 --source $SOURCE_TYPE --file /path/to/log" >&2
     exit 1
   fi
+}
 
-  local FIRST_LINE
-  FIRST_LINE=$(grep -m1 '[^[:space:]]' "$LOG_FILE" 2>/dev/null || true)
-  if [[ -z "$FIRST_LINE" ]]; then
-    echo "Error: file is empty" >&2
-    exit 1
-  fi
-
-  if ! echo "$FIRST_LINE" | grep -qP '^\S+\s+\S+\s+\S+\s+\[.+?\]\s+"[A-Z]+\s+\S+\s+HTTP/\d\.\d"\s+\d{3}\s+\S+'; then
-    echo "Error: '$LOG_FILE' does not look like an nginx access log" >&2
-    echo "  First line: $FIRST_LINE" >&2
-    exit 1
+prepare_records() {
+  rm -f "$RECORDS_FILE"
+  RECORDS_FILE=$(mktemp)
+  if ! parse_input_to_records "$SOURCE_TYPE" "$INPUT_FILE" "$RECORDS_FILE"; then
+    rm -f "$RECORDS_FILE"
+    RECORDS_FILE=
+    return 1
   fi
 }
 
 stats_summary() {
   local COUNT
+  local records_file=$1
   COUNT=$2
-  echo -e "\nTop $COUNT IP addresses with the most requests:"
-  awk '{print $1}' "$LOG_FILE" | sort | uniq -c | sort -nr | awk '{printf "%s - %d Requests\n", $2, $1}' | head -n "$COUNT"
+  if [[ "$SOURCE_TYPE" == nginx ]]; then
+    echo -e "\nTop $COUNT IP addresses with the most requests:"
+    awk '{print $1}' "$records_file" | sort | uniq -c | sort -nr | awk '{printf "%s - %d Requests\n", $2, $1}' | head -n "$COUNT"
 
-  echo -e "\nTop $COUNT most requested paths:"
-  awk '{print $7}' "$LOG_FILE" | sort | uniq -c | sort -nr | awk '{printf "%s - %d Requests\n", $2, $1}' | head -n "$COUNT"
+    echo -e "\nTop $COUNT most requested paths:"
+    awk '{print $7}' "$records_file" | sort | uniq -c | sort -nr | awk '{printf "%s - %d Requests\n", $2, $1}' | head -n "$COUNT"
 
-  echo -e "\nTop $COUNT response status codes:"
-  grep -oE ' [0-9][0-9][0-9] ' "$LOG_FILE" | sort | uniq -c | sort -nr | head -n "$COUNT" | awk '{printf "%s - %d Requests\n", $2, $1}'
+    echo -e "\nTop $COUNT response status codes:"
+    grep -oE ' [0-9][0-9][0-9] ' "$records_file" | sort | uniq -c | sort -nr | head -n "$COUNT" | awk '{printf "%s - %d Requests\n", $2, $1}'
 
-  echo -e "\nTop $COUNT user agents:"
-  awk -F'"' '{print $6}' "$LOG_FILE" | sort | uniq -c | sort -nr | head -n "$COUNT" | awk '{for(i=2;i<=NF;i++) printf "%s ", $i; print "-",$1,"requests" }'
+    echo -e "\nTop $COUNT user agents:"
+    awk -F'"' '{print $6}' "$records_file" | sort | uniq -c | sort -nr | head -n "$COUNT" | awk '{for(i=2;i<=NF;i++) printf "%s ", $i; print "-",$1,"requests" }'
+    printf "\n"
+    return 0
+  fi
+
+  echo -e "\nSources:"
+  jq -sr --argjson count "$COUNT" '
+    [.[] | .source] | group_by(.) | map({name: .[0], count: length}) |
+    sort_by(-.count) | .[:$count][] | "\(.name) - \(.count) records"
+  ' "$records_file"
+
+  echo -e "\nSeverities:"
+  jq -sr --argjson count "$COUNT" '
+    [.[] | .severity] | group_by(.) | map({name: .[0], count: length}) |
+    sort_by(-.count) | .[:$count][] | "\(.name) - \(.count) records"
+  ' "$records_file"
+
+  echo -e "\nTop client IPs:"
+  jq -sr --argjson count "$COUNT" '
+    [.[] | .fields.ip? // "N/A"] | group_by(.) | map({name: .[0], count: length}) |
+    sort_by(-.count) | .[:$count][] | "\(.name) - \(.count) requests"
+  ' "$records_file"
+
+  echo -e "\nTop request paths:"
+  jq -sr --argjson count "$COUNT" '
+    [.[] | .fields.path? // "N/A"] | group_by(.) | map({name: .[0], count: length}) |
+    sort_by(-.count) | .[:$count][] | "\(.name) - \(.count) requests"
+  ' "$records_file"
+
+  echo -e "\nTop response status codes:"
+  jq -sr --argjson count "$COUNT" '
+    [.[] | .fields.status? // "N/A"] | group_by(.) | map({name: .[0], count: length}) |
+    sort_by(-.count) | .[:$count][] | "\(.name) - \(.count) requests"
+  ' "$records_file"
+
+  echo -e "\nTop user agents:"
+  jq -sr --argjson count "$COUNT" '
+    [.[] | .fields.user_agent? // "N/A"] | group_by(.) | map({name: .[0], count: length}) |
+    sort_by(-.count) | .[:$count][] | "\(.name) - \(.count) requests"
+  ' "$records_file"
   printf "\n"
-
 }
 
 display() {
-  resolve_log_file
+  resolve_input
   echo "How many lines do you want to display?:"
   read -r COUNT
   clear
-  stats_summary "$LOG_FILE" "$COUNT"
+  if [[ "$SOURCE_TYPE" == nginx ]]; then
+    stats_summary "$INPUT_FILE" "$COUNT"
+  else
+    prepare_records
+    stats_summary "$RECORDS_FILE" "$COUNT"
+    rm -f "$RECORDS_FILE"
+    RECORDS_FILE=
+  fi
 
 }
 
@@ -169,38 +278,52 @@ request_provider() {
 }
 
 request_analysis() {
-  resolve_log_file
+  resolve_input
   local response
   local summary
   local recent_lines
-  summary=$(stats_summary "$LOG_FILE" 10)
-  recent_lines=$(tail -n 30 "$LOG_FILE")
-  local system_prompt='Analyze the Nginx access log for anomalies. Return only valid JSON with this schema: {"anomaly": boolean, "findings": string}. Set anomaly to true only when the log contains a meaningful anomaly.'
+  if [[ "$SOURCE_TYPE" == nginx ]]; then
+    summary=$(stats_summary "$INPUT_FILE" 10)
+    recent_lines=$(tail -n 30 "$INPUT_FILE")
+  else
+    prepare_records
+    summary=$(stats_summary "$RECORDS_FILE" 10)
+    recent_lines=$(tail -n 30 "$RECORDS_FILE")
+  fi
+  local system_prompt='Analyze server log records for anomalies. Return only valid JSON with this schema: {"anomaly": boolean, "findings": string}. Set anomaly to true only when the records contain a meaningful anomaly.'
   local user_prompt
-  user_prompt=$(printf 'Nginx summary for %s:\n%s\n\nLast 30 raw lines:\n%s\n\nTask: identify anomalies.' "$LOG_FILE" "$summary" "$recent_lines")
+  user_prompt=$(printf '%s summary for %s:\n%s\n\nLast 30 normalized records:\n%s\n\nTask: identify anomalies.' "$SOURCE_TYPE" "${INPUT_FILE:-system journal}" "$summary" "$recent_lines")
   REQUEST_BODY=$(build_request "$OPENROUTER_MODEL" "$system_prompt" "$user_prompt")
 
   if response=$(request_provider openrouter); then
     printf '%s' "$response"
+    rm -f "$RECORDS_FILE"
+    RECORDS_FILE=
     return 0
   fi
 
   if [[ -z "$GROQ_API_KEY" ]]; then
     echo "Error: OpenRouter failed and GROQ_API_KEY is not configured" >&2
+    rm -f "$RECORDS_FILE"
+    RECORDS_FILE=
     return 1
   fi
 
   REQUEST_BODY=$(build_request "$GROQ_MODEL" "$system_prompt" "$user_prompt")
   if response=$(request_provider groq); then
     printf '%s' "$response"
+    rm -f "$RECORDS_FILE"
+    RECORDS_FILE=
     return 0
   fi
+  rm -f "$RECORDS_FILE"
+  RECORDS_FILE=
   echo "Error: both OpenRouter and Groq analysis requests failed" >&2
   return 1
 }
 
 analyse() {
-  resolve_log_file
+  resolve_input
   clear
   sleep 1
   local final_response
@@ -254,6 +377,7 @@ service_analysis() {
 setup() {
   sudo mkdir -p /usr/share/bogger/systemd
   sudo cp "$SCRIPT_DIR/bogger.sh" /usr/bin/bogger
+  sudo cp "$PARSER_FILE" /usr/share/bogger/parsers.sh
   sudo cp "$SCRIPT_DIR/systemd/bogger.service" "$SCRIPT_DIR/systemd/bogger.timer" "$SCRIPT_DIR/systemd/bogger.env.example" /usr/share/bogger/systemd/
 }
 
@@ -264,6 +388,7 @@ remove() {
   sudo rm -f /etc/systemd/system/bogger.timer /etc/systemd/system/bogger.service
   sudo systemctl daemon-reload
   sudo rm /usr/bin/bogger
+  sudo rm -f /usr/share/bogger/parsers.sh
   sudo rm -rf /usr/share/bogger
 }
 
@@ -278,6 +403,7 @@ install_systemd_service() {
   fi
   sudo mkdir -p /etc/bogger
   sudo cp "$SCRIPT_DIR/bogger.sh" /usr/bin/bogger
+  sudo cp "$PARSER_FILE" /usr/share/bogger/parsers.sh
   sudo cp "$unit_source_dir/bogger.service" /etc/systemd/system/bogger.service
   sudo cp "$unit_source_dir/bogger.timer" /etc/systemd/system/bogger.timer
   if [[ ! -f /etc/bogger/bogger.env ]]; then
@@ -334,6 +460,7 @@ welcome() {
 }
 
 load_configuration
+parse_cli_arguments "$@"
 
 if ((NONINTERACTIVE)); then
   service_analysis
