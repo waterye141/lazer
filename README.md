@@ -76,12 +76,24 @@ Available flags:
 
 | Flag | Purpose |
 | --- | --- |
+| `--stats` | Run local statistics directly using the selected parser. |
+| `--analyze` | Run AI anomaly analysis directly using the selected parser. |
 | `--source SOURCE` | Select `nginx`, `apache`, `ssh`, `systemd_journal`, `haproxy`, `docker`, or `generic`. |
 | `--file PATH` | Select a file for file-based sources. |
 | `--unit UNIT` | Restrict `systemd_journal` input to a systemd unit. |
 | `--since TIME` | Restrict journal input to a start time such as `today`. |
 | `--until TIME` | Restrict journal input to an end time. |
 | `--service` | Run once without prompts using `/etc/lazer/lazer.env`; used by systemd. |
+
+When `--source` or `--file` is supplied without `--stats` or `--analyze`, Lazer displays a two-option prompt for local statistics or AI analysis and then dispatches the selected parser. If neither action flag nor source/file arguments are supplied, the full installation and service menu is shown. `systemd_journal` requires an explicit `--stats` or `--analyze` action.
+
+Examples:
+
+```bash
+./lazer.sh --stats --source apache --file /var/log/apache2/access.log
+./lazer.sh --analyze --source ssh --file /var/log/auth.log
+./lazer.sh --stats --source systemd_journal --unit ssh.service --since today
+```
 
 Reports use the same categories as the original Nginx analyzer: top client IPs, requested paths or targets, response status codes, and user agents. Sources that do not provide a category show `N/A`.
 

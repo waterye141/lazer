@@ -20,8 +20,9 @@ parse_http_line() {
   local source=$1
   local line=$2
   local ip timestamp method path protocol status bytes user_agent
-  local fields
-  if [[ "$line" =~ ^([^[:space:]]+)[[:space:]]+[^[:space:]]+[[:space:]]+[^[:space:]]+[[:space:]]+\[([^]]+)\][[:space:]]+\"([A-Z]+)[[:space:]]+([^[:space:]]+)[[:space:]]+(HTTP/[0-9.]+)\"[[:space:]]+([0-9]{3})[[:space:]]+([^[:space:]]+)([[:space:]]+\"[^\"]*\")?[[:space:]]+\"([^\"]*)\" ]]; then
+  local fields http_pattern
+  http_pattern='^([^[:space:]]+)[[:space:]]+[^[:space:]]+[[:space:]]+[^[:space:]]+[[:space:]]+\[([^]]+)\][[:space:]]+"([A-Z]+)[[:space:]]+([^[:space:]]+)[[:space:]]+(HTTP/[0-9.]+)"[[:space:]]+([0-9]{3})[[:space:]]+([^[:space:]]+)([[:space:]]+"[^"]*")?[[:space:]]+"([^"]*)"'
+  if [[ "$line" =~ $http_pattern ]]; then
     ip=${BASH_REMATCH[1]}
     timestamp=${BASH_REMATCH[2]}
     method=${BASH_REMATCH[3]}
@@ -49,7 +50,7 @@ parse_syslog_line() {
   local source=$1
   local line=$2
   local timestamp host process message severity
-  local fields
+  local fields jq_filter
   if [[ "$line" =~ ^([A-Z][a-z]{2}[[:space:]]+[0-9]{1,2}[[:space:]]+[0-9:]{8})[[:space:]]+([^[:space:]]+)[[:space:]]+([^:]+):[[:space:]]+(.*)$ ]]; then
     timestamp=${BASH_REMATCH[1]}
     host=${BASH_REMATCH[2]}
@@ -57,9 +58,12 @@ parse_syslog_line() {
     message=${BASH_REMATCH[4]}
     severity=info
     [[ "$message" =~ (failed|failure|error|invalid|attack|denied) ]] && severity=warning
-    fields=$(jq -cn --arg host "$host" --arg process "$process" --arg message "$message" '
-      {ip: (if ($message | capture("(?<ip>[0-9]{1,3}(\\.[0-9]{1,3}){3})")?) then ($message | capture("(?<ip>[0-9]{1,3}(\\.[0-9]{1,3}){3})").ip) else "N/A" end),
-       path: "N/A", status: null, user_agent: "N/A", host: $host, process: $process}')
+    jq_filter=$(cat <<'JQ_FILTER'
+{ip: (if ($message | capture("(?<ip>[0-9]{1,3}(\\.[0-9]{1,3}){3})")?) then ($message | capture("(?<ip>[0-9]{1,3}(\\.[0-9]{1,3}){3})").ip) else "N/A" end),
+ path: "N/A", status: null, user_agent: "N/A", host: $host, process: $process}
+JQ_FILTER
+)
+    fields=$(jq -cn --arg host "$host" --arg process "$process" --arg message "$message" "$jq_filter")
     json_record "$timestamp" "$source" "$severity" "$line" "$fields"
     return 0
   fi
@@ -68,15 +72,20 @@ parse_syslog_line() {
 
 parse_docker_line() {
   local line=$1
-  if jq -e 'type == "object" and (.log? != null)' >/dev/null 2>&1 <<<"$line"; then
-    jq -c --arg source docker '
-      {
-        timestamp: (.time // ""),
-        source: $source,
-        severity: (if ((.log // "") | test("(?i)(error|fail|fatal|denied)")) then "warning" else "info" end),
-        message: ((.log // "") | rtrimstr("\n")),
-        fields: {ip: "N/A", path: "N/A", status: null, user_agent: "N/A", stream: (.stream // "")}
-      }' <<<"$line"
+  local jq_filter
+  jq_filter='type == "object" and (.log? != null)'
+  if jq -e "$jq_filter" >/dev/null 2>&1 <<<"$line"; then
+    jq_filter=$(cat <<'JQ_FILTER'
+{
+  timestamp: (.time // ""),
+  source: $source,
+  severity: (if ((.log // "") | test("(?i)(error|fail|fatal|denied)")) then "warning" else "info" end),
+  message: ((.log // "") | rtrimstr("\n")),
+  fields: {ip: "N/A", path: "N/A", status: null, user_agent: "N/A", stream: (.stream // "")}
+}
+JQ_FILTER
+)
+    jq -c --arg source docker "$jq_filter" <<<"$line"
     return 0
   fi
   return 1
@@ -85,7 +94,8 @@ parse_docker_line() {
 parse_haproxy_line() {
   local line=$1
   local ip status request method path protocol timestamp
-  local fields
+  local fields request_pattern
+  request_pattern='"([A-Z]+)[[:space:]]+([^[:space:]]+)[[:space:]]+(HTTP/[0-9.]+)"'
   if [[ "$line" =~ ^([A-Z][a-z]{2}[[:space:]]+[0-9]{1,2}[[:space:]]+[0-9:]{8})[[:space:]]+ ]]; then
     timestamp=${BASH_REMATCH[1]}
   else
@@ -94,7 +104,7 @@ parse_haproxy_line() {
   ip=$(grep -oE '([0-9]{1,3}\.){3}[0-9]{1,3}:[0-9]+' <<<"$line" | head -n 1 | cut -d: -f1)
   status=$(grep -oE '[[:space:]][0-9]{3}[[:space:]]' <<<"$line" | tail -n 1 | tr -d ' ')
   request=$(grep -oE '"[A-Z]+ [^"]+ HTTP/[0-9.]+"' <<<"$line" | tail -n 1)
-  if [[ -n "$ip" && -n "$status" && "$request" =~ \"([A-Z]+)[[:space:]]+([^[:space:]]+)[[:space:]]+(HTTP/[0-9.]+)\" ]]; then
+  if [[ -n "$ip" && -n "$status" && "$request" =~ $request_pattern ]]; then
     method=${BASH_REMATCH[1]}
     path=${BASH_REMATCH[2]}
     protocol=${BASH_REMATCH[3]}
@@ -156,22 +166,26 @@ parse_line() {
 }
 
 parse_journal_line() {
-  jq -c '
-    {
-      timestamp: (.__REALTIME_TIMESTAMP // ""),
-      source: "systemd_journal",
-      severity: (if ((.PRIORITY // "6") | tonumber) <= 3 then "error" elif ((.PRIORITY // "6") | tonumber) <= 4 then "warning" else "info" end),
-      message: (.__MESSAGE // ""),
-      fields: {
-        ip: "N/A",
-        path: "N/A",
-        status: null,
-        user_agent: "N/A",
-        unit: (._SYSTEMD_UNIT // ""),
-        facility: (.SYSLOG_FACILITY // ""),
-        pid: (._PID // "")
-      }
-    }'
+  local jq_filter
+  jq_filter=$(cat <<'JQ_FILTER'
+{
+  timestamp: (.__REALTIME_TIMESTAMP // ""),
+  source: "systemd_journal",
+  severity: (if ((.PRIORITY // "6") | tonumber) <= 3 then "error" elif ((.PRIORITY // "6") | tonumber) <= 4 then "warning" else "info" end),
+  message: (.__MESSAGE // ""),
+  fields: {
+    ip: "N/A",
+    path: "N/A",
+    status: null,
+    user_agent: "N/A",
+    unit: (._SYSTEMD_UNIT // ""),
+    facility: (.SYSLOG_FACILITY // ""),
+    pid: (._PID // "")
+  }
+}
+JQ_FILTER
+)
+  jq -c "$jq_filter"
 }
 
 parse_input_to_records() {

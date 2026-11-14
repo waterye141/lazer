@@ -16,6 +16,8 @@ JOURNALCTL_ARGS=${LAZER_JOURNALCTL_ARGS:-}
 RECORDS_FILE=
 CLI_SOURCE=
 CLI_INPUT_FILE=
+CLI_INPUT_SELECTION=0
+CLI_ACTION=
 PARSER_FILE="$SCRIPT_DIR/parsers.sh"
 [[ -f "$PARSER_FILE" ]] || PARSER_FILE="/usr/share/lazer/parsers.sh"
 # shellcheck disable=SC1090
@@ -26,6 +28,7 @@ if [[ "${1:-}" == "--service" ]]; then
 fi
 if [[ -n "${1:-}" && "${1:0:2}" != "--" ]]; then
   CLI_INPUT_FILE=$1
+  CLI_INPUT_SELECTION=1
   shift
 fi
 
@@ -80,12 +83,30 @@ load_configuration() {
 parse_cli_arguments() {
   while (($#)); do
     case "$1" in
+    --stats)
+      if [[ -n "$CLI_ACTION" && "$CLI_ACTION" != stats ]]; then
+        echo "Error: --stats and --analyze cannot be used together" >&2
+        return 1
+      fi
+      CLI_ACTION=stats
+      shift
+      ;;
+    --analyze)
+      if [[ -n "$CLI_ACTION" && "$CLI_ACTION" != analyze ]]; then
+        echo "Error: --stats and --analyze cannot be used together" >&2
+        return 1
+      fi
+      CLI_ACTION=analyze
+      shift
+      ;;
     --source)
       CLI_SOURCE=${2:-}
+      CLI_INPUT_SELECTION=1
       shift 2
       ;;
     --file)
       CLI_INPUT_FILE=${2:-}
+      CLI_INPUT_SELECTION=1
       shift 2
       ;;
     --unit)
@@ -102,10 +123,11 @@ parse_cli_arguments() {
       ;;
     --help)
       cat <<'EOF'
-Usage: lazer.sh [--service] [--source SOURCE] [--file PATH]
+Usage: lazer.sh [--stats|--analyze] [--service] [--source SOURCE] [--file PATH]
 
 Sources: nginx, apache, ssh, systemd_journal, haproxy, docker, generic
 Journal options: --unit UNIT, --since TIME, --until TIME
+Actions: --stats for local statistics, --analyze for AI anomaly analysis
 EOF
       exit 0
       ;;
@@ -374,6 +396,27 @@ analyse() {
   printf '%s\n' "$final_response" | jq -r '.findings // empty'
 }
 
+select_action() {
+  local action_selection
+  echo
+  echo "Choose an action:"
+  echo "1 - View local statistics"
+  echo "2 - Run AI anomaly analysis"
+  read -r action_selection
+  case "$action_selection" in
+  1)
+    CLI_ACTION=stats
+    ;;
+  2)
+    CLI_ACTION=analyze
+    ;;
+  *)
+    echo "Invalid action selection." >&2
+    return 1
+    ;;
+  esac
+}
+
 select_service() {
   local service_selection
   echo
@@ -556,6 +599,35 @@ parse_cli_arguments "$@"
 
 if ((NONINTERACTIVE)); then
   service_analysis
+  exit $?
+fi
+
+if [[ -n "$CLI_ACTION" ]]; then
+  case "$CLI_ACTION" in
+  stats)
+    display
+    ;;
+  analyze)
+    analyse
+    ;;
+  esac
+  exit $?
+fi
+
+if ((CLI_INPUT_SELECTION)); then
+  if [[ "$SOURCE_TYPE" == systemd_journal ]]; then
+    echo "Error: --source systemd_journal requires --stats or --analyze" >&2
+    exit 1
+  fi
+  select_action || exit 1
+  case "$CLI_ACTION" in
+  stats)
+    display
+    ;;
+  analyze)
+    analyse
+    ;;
+  esac
   exit $?
 fi
 
