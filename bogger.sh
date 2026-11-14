@@ -2,6 +2,11 @@
 set -e
 
 OPENROUTER_API_KEY=${OPENROUTER_API_KEY:-}
+GROQ_API_KEY=${GROQ_API_KEY:-}
+OPENROUTER_MODEL=${OPENROUTER_MODEL:-openrouter/free}
+GROQ_MODEL=${GROQ_MODEL:-openai/gpt-oss-120b}
+OPENROUTER_API_URL=${OPENROUTER_API_URL:-https://openrouter.ai/api/v1/chat/completions}
+GROQ_API_URL=${GROQ_API_URL:-https://api.groq.com/openai/v1/chat/completions}
 NONINTERACTIVE=0
 SERVICE_ENV_FILE=${BOGGER_ENV_FILE:-/etc/bogger/bogger.env}
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
@@ -92,6 +97,77 @@ extract_content() {
   jq -r '.choices[0].message.content // empty'
 }
 
+build_request() {
+  local model=$1
+  local system_prompt=$2
+  local user_prompt=$3
+  jq -n \
+    --arg model "$model" \
+    --arg system "$system_prompt" \
+    --arg user "$user_prompt" \
+    '{model: $model, messages: [{role: "system", content: $system}, {role: "user", content: $user}], temperature: 0.2, max_tokens: 6000}'
+}
+
+request_provider() {
+  local provider=$1
+  local api_key
+  local api_url
+  local model
+  case "$provider" in
+  openrouter)
+    api_key=$OPENROUTER_API_KEY
+    api_url=$OPENROUTER_API_URL
+    model=$OPENROUTER_MODEL
+    ;;
+  groq)
+    api_key=$GROQ_API_KEY
+    api_url=$GROQ_API_URL
+    model=$GROQ_MODEL
+    ;;
+  *)
+    echo "Error: unsupported provider '$provider'" >&2
+    return 1
+    ;;
+  esac
+
+  if [[ -z "$api_key" ]]; then
+    echo "Provider '$provider' is not configured" >&2
+    return 1
+  fi
+
+  local raw_response
+  if ! raw_response=$(
+    curl -sS --connect-timeout 15 --max-time 120 \
+      -w $'\n%{http_code}' \
+      "$api_url" \
+      -H "Content-Type: application/json" \
+      -H "Authorization: Bearer $api_key" \
+      -d "$REQUEST_BODY"
+  ); then
+    echo "Provider '$provider' request failed" >&2
+    return 1
+  fi
+
+  local http_code=${raw_response##*$'\n'}
+  local response=${raw_response%$'\n'*}
+  if [[ ! "$http_code" =~ ^2[0-9][0-9]$ ]]; then
+    echo "Provider '$provider' returned HTTP $http_code" >&2
+    return 1
+  fi
+
+  local content
+  content=$(printf '%s' "$response" | extract_content)
+  if [[ -z "$content" ]]; then
+    echo "Provider '$provider' returned no analysis content" >&2
+    return 1
+  fi
+  if ! printf '%s' "$content" | jq -e 'type == "object" and (.anomaly | type == "boolean") and (.findings | type == "string")' >/dev/null 2>&1; then
+    echo "Provider '$provider' returned an invalid analysis schema" >&2
+    return 1
+  fi
+  printf '%s' "$content"
+}
+
 request_analysis() {
   resolve_log_file
   local response
@@ -99,23 +175,28 @@ request_analysis() {
   local recent_lines
   summary=$(stats_summary "$LOG_FILE" 10)
   recent_lines=$(tail -n 30 "$LOG_FILE")
-  response=$(
-    curl -sS https://openrouter.ai/api/v1/chat/completions \
-      -H "Content-Type: application/json" \
-      -H "Authorization: Bearer $OPENROUTER_API_KEY" \
-      -d "$(jq -n \
-        --arg model "nvidia/nemotron-3.5-lightning" \
-        --arg system "Analyze the Nginx access log for anomalies. Return only valid JSON with this schema: {\"anomaly\": boolean, \"findings\": string}. Set anomaly to true only when the log contains a meaningful anomaly." \
-        --arg user "Nginx summary for $LOG_FILE:\n$summary\n\nLast 30 raw lines:\n$recent_lines\n\nTask: identify anomalies." \
-        '{model: $model, messages: [{role: "system", content: $system}, {role: "user", content: $user}], temperature: 0.2, max_tokens: 6000}')"
-  )
-  local content
-  content=$(printf '%s' "$response" | extract_content)
-  if [[ -z "$content" ]]; then
-    echo "Error: OpenRouter returned no analysis content" >&2
+  local system_prompt='Analyze the Nginx access log for anomalies. Return only valid JSON with this schema: {"anomaly": boolean, "findings": string}. Set anomaly to true only when the log contains a meaningful anomaly.'
+  local user_prompt
+  user_prompt=$(printf 'Nginx summary for %s:\n%s\n\nLast 30 raw lines:\n%s\n\nTask: identify anomalies.' "$LOG_FILE" "$summary" "$recent_lines")
+  REQUEST_BODY=$(build_request "$OPENROUTER_MODEL" "$system_prompt" "$user_prompt")
+
+  if response=$(request_provider openrouter); then
+    printf '%s' "$response"
+    return 0
+  fi
+
+  if [[ -z "$GROQ_API_KEY" ]]; then
+    echo "Error: OpenRouter failed and GROQ_API_KEY is not configured" >&2
     return 1
   fi
-  printf '%s' "$content"
+
+  REQUEST_BODY=$(build_request "$GROQ_MODEL" "$system_prompt" "$user_prompt")
+  if response=$(request_provider groq); then
+    printf '%s' "$response"
+    return 0
+  fi
+  echo "Error: both OpenRouter and Groq analysis requests failed" >&2
+  return 1
 }
 
 analyse() {
@@ -160,10 +241,6 @@ service_analysis() {
   fi
   local result
   result=$(request_analysis) || return 1
-  if ! printf '%s' "$result" | jq -e 'type == "object" and (.anomaly | type == "boolean") and (.findings | type == "string")' >/dev/null 2>&1; then
-    echo "Error: analysis response did not match the required schema" >&2
-    return 1
-  fi
   if [[ "$(printf '%s' "$result" | jq -r '.anomaly')" == "true" ]]; then
     local findings
     findings=$(printf '%s' "$result" | jq -r '.findings')

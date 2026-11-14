@@ -13,18 +13,26 @@ The script will fail to run if the file is not a valid Nginx access log file. Yo
 
 You can use you own API key by renaming the `.env.example` to `.env` and simply adding it to the file.
 
+Currently only supports OpenRouter and Groq models.
+
 ## Systemd service
 
 Select option `4` from the menu to install the system-wide hourly timer and service. The installer copies the executable to `/usr/bin/bogger`, installs the units, and creates `/etc/bogger/bogger.env` from the example if it does not exist.
 
 Edit `/etc/bogger/bogger.env` before relying on the timer:
 
-- `OPENROUTER_API_KEY` is required.
+- `OPENROUTER_API_KEY` is required and OpenRouter is always tried first.
+- `GROQ_API_KEY` is optional; Groq is used as a fallback when OpenRouter has a network/HTTP error, empty response, or invalid analysis response.
+- `OPENROUTER_MODEL` defaults to `openrouter/free`.
+- `GROQ_MODEL` defaults to `openai/gpt-oss-120b`.
+- `OPENROUTER_API_URL` and `GROQ_API_URL` are configurable for compatible endpoints.
 - `LOG_FILE` is optional; when empty, Bogger uses its existing Nginx log discovery.
 - `BOGGER_EMAIL_RECIPIENT` is required for anomaly email.
 - `BOGGER_MAIL_COMMAND` should point to a `mail`/`mailx`-compatible executable.
 
-The service runs `bogger --service` hourly, writes output and errors to the journal, and sends mail only when the structured OpenRouter response sets `anomaly` to `true`. Inspect it with `systemctl status bogger.timer`, `systemctl status bogger.service`, or `journalctl -u bogger.service`.
+The service runs `bogger --service` hourly, writes output and errors to the journal, and sends mail only when a validated provider response sets `anomaly` to `true`. Inspect it with `systemctl status bogger.timer`, `systemctl status bogger.service`, or `journalctl -u bogger.service`.
+
+Groq model access and quotas depend on the account and plan; model IDs remain configurable so the fallback can be updated independently of the script.
 
 To run the unattended path once without waiting for the timer:
 
