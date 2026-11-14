@@ -1,13 +1,13 @@
 [Unit]
-Description=Bogger Nginx anomaly analysis
+Description=Lazer Nginx anomaly analysis
 After=network-online.target nginx.service
 Wants=network-online.target
 
 [Service]
 Type=oneshot
-ExecStart=/usr/bin/bogger --service
-EnvironmentFile=-/etc/bogger/bogger.env
-WorkingDirectory=/etc/bogger
+ExecStart=/usr/bin/lazer --service
+EnvironmentFile=-/etc/lazer/lazer.env
+WorkingDirectory=/etc/lazer
 StandardOutput=journal
 StandardError=journal
 

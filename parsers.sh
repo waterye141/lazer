@@ -129,10 +129,10 @@ parse_line() {
   local source=$1
   local line=$2
   case "$source" in
-  nginx|apache)
+  nginx | apache)
     parse_http_line "$source" "$line" || parse_generic_line "$source" "$line"
     ;;
-  ssh|haproxy)
+  ssh | haproxy)
     if [[ "$source" == haproxy ]]; then
       parse_haproxy_line "$line" || parse_syslog_line "$source" "$line" || parse_generic_line "$source" "$line"
     else
@@ -182,7 +182,11 @@ parse_input_to_records() {
       echo "Error: journalctl is required for systemd_journal input" >&2
       return 1
     fi
-    if ! journalctl --no-pager -o json ${JOURNALCTL_ARGS:-} >"$output_file"; then
+    local -a journal_args=()
+    if [[ -n "${JOURNALCTL_ARGS:-}" ]]; then
+      read -r -a journal_args <<<"$JOURNALCTL_ARGS"
+    fi
+    if ! journalctl --no-pager -o json "${journal_args[@]}" >"$output_file"; then
       echo "Error: journalctl could not read the requested input" >&2
       return 1
     fi

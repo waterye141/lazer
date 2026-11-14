@@ -3,21 +3,21 @@ set -e
 
 OPENROUTER_API_KEY=${OPENROUTER_API_KEY:-}
 GROQ_API_KEY=${GROQ_API_KEY:-}
-OPENROUTER_MODEL=${OPENROUTER_MODEL:-openrouter/free}
-GROQ_MODEL=${GROQ_MODEL:-openai/gpt-oss-120b}
-OPENROUTER_API_URL=${OPENROUTER_API_URL:-https://openrouter.ai/api/v1/chat/completions}
-GROQ_API_URL=${GROQ_API_URL:-https://api.groq.com/openai/v1/chat/completions}
+OPENROUTER_MODEL=${OPENROUTER_MODEL:-}
+GROQ_MODEL=${GROQ_MODEL:-}
+OPENROUTER_API_URL=${OPENROUTER_API_URL:-}
+GROQ_API_URL=${GROQ_API_URL:-}
 NONINTERACTIVE=0
-SERVICE_ENV_FILE=${BOGGER_ENV_FILE:-/etc/bogger/bogger.env}
+SERVICE_ENV_FILE=${LAZER_ENV_FILE:-/etc/lazer/lazer.env}
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
-SOURCE_TYPE=${BOGGER_SOURCE:-nginx}
-INPUT_FILE=${BOGGER_INPUT_FILE:-}
-JOURNALCTL_ARGS=${BOGGER_JOURNALCTL_ARGS:-}
+SOURCE_TYPE=${LAZER_SOURCE:-}
+INPUT_FILE=${LAZER_INPUT_FILE:-}
+JOURNALCTL_ARGS=${LAZER_JOURNALCTL_ARGS:-}
 RECORDS_FILE=
 CLI_SOURCE=
 CLI_INPUT_FILE=
 PARSER_FILE="$SCRIPT_DIR/parsers.sh"
-[[ -f "$PARSER_FILE" ]] || PARSER_FILE="/usr/share/bogger/parsers.sh"
+[[ -f "$PARSER_FILE" ]] || PARSER_FILE="/usr/share/lazer/parsers.sh"
 # shellcheck disable=SC1090
 source "$PARSER_FILE"
 if [[ "${1:-}" == "--service" ]]; then
@@ -30,15 +30,51 @@ if [[ -n "${1:-}" && "${1:0:2}" != "--" ]]; then
 fi
 
 load_configuration() {
-  if [[ -z "$OPENROUTER_API_KEY" && -f .env ]]; then
-    OPENROUTER_API_KEY=$(cat .env)
+  if [[ -f .env ]]; then
+    local env_openrouter_api_key=$OPENROUTER_API_KEY
+    local env_groq_api_key=$GROQ_API_KEY
+    local env_openrouter_model=$OPENROUTER_MODEL
+    local env_groq_model=$GROQ_MODEL
+    local env_openrouter_api_url=$OPENROUTER_API_URL
+    local env_groq_api_url=$GROQ_API_URL
+    local env_source_type=$SOURCE_TYPE
+    local env_input_file=$INPUT_FILE
+    local env_journalctl_args=$JOURNALCTL_ARGS
+    local env_email_recipient=${LAZER_EMAIL_RECIPIENT:-}
+    local env_mail_command=${LAZER_MAIL_COMMAND:-}
+    local env_log_file=${LOG_FILE:-}
+    if grep -qE '^[[:space:]]*(export[[:space:]]+)?[A-Za-z_][A-Za-z0-9_]*=' .env; then
+      set -a
+      # shellcheck disable=SC1091
+      source .env
+      set +a
+    elif [[ -z "$OPENROUTER_API_KEY" ]]; then
+      OPENROUTER_API_KEY=$(sed -n 's/^[[:space:]]*//; /^[^#[:space:]]/p; q' .env)
+    fi
+    if [[ -n "$env_openrouter_api_key" ]]; then OPENROUTER_API_KEY=$env_openrouter_api_key; fi
+    if [[ -n "$env_groq_api_key" ]]; then GROQ_API_KEY=$env_groq_api_key; fi
+    if [[ -n "$env_openrouter_model" ]]; then OPENROUTER_MODEL=$env_openrouter_model; fi
+    if [[ -n "$env_groq_model" ]]; then GROQ_MODEL=$env_groq_model; fi
+    if [[ -n "$env_openrouter_api_url" ]]; then OPENROUTER_API_URL=$env_openrouter_api_url; fi
+    if [[ -n "$env_groq_api_url" ]]; then GROQ_API_URL=$env_groq_api_url; fi
+    if [[ -n "$env_source_type" ]]; then SOURCE_TYPE=$env_source_type; fi
+    if [[ -n "$env_input_file" ]]; then INPUT_FILE=$env_input_file; fi
+    if [[ -n "$env_journalctl_args" ]]; then JOURNALCTL_ARGS=$env_journalctl_args; fi
+    if [[ -n "$env_email_recipient" ]]; then LAZER_EMAIL_RECIPIENT=$env_email_recipient; fi
+    if [[ -n "$env_mail_command" ]]; then LAZER_MAIL_COMMAND=$env_mail_command; fi
+    if [[ -n "$env_log_file" ]]; then LOG_FILE=$env_log_file; fi
   fi
 
   if [[ -f "$SERVICE_ENV_FILE" ]]; then
     source "$SERVICE_ENV_FILE"
   fi
-  SOURCE_TYPE=${BOGGER_SOURCE:-$SOURCE_TYPE}
-  INPUT_FILE=${BOGGER_INPUT_FILE:-${LOG_FILE:-$INPUT_FILE}}
+  SOURCE_TYPE=${LAZER_SOURCE:-$SOURCE_TYPE}
+  INPUT_FILE=${LAZER_INPUT_FILE:-${LOG_FILE:-$INPUT_FILE}}
+  OPENROUTER_MODEL=${OPENROUTER_MODEL:-openrouter/free}
+  GROQ_MODEL=${GROQ_MODEL:-openai/gpt-oss-120b}
+  OPENROUTER_API_URL=${OPENROUTER_API_URL:-https://openrouter.ai/api/v1/chat/completions}
+  GROQ_API_URL=${GROQ_API_URL:-https://api.groq.com/openai/v1/chat/completions}
+  SOURCE_TYPE=${SOURCE_TYPE:-nginx}
 }
 
 parse_cli_arguments() {
@@ -66,7 +102,7 @@ parse_cli_arguments() {
       ;;
     --help)
       cat <<'EOF'
-Usage: bogger.sh [--service] [--source SOURCE] [--file PATH]
+Usage: lazer.sh [--service] [--source SOURCE] [--file PATH]
 
 Sources: nginx, apache, ssh, systemd_journal, haproxy, docker, generic
 Journal options: --unit UNIT, --since TIME, --until TIME
@@ -338,22 +374,79 @@ analyse() {
   printf '%s\n' "$final_response" | jq -r '.findings // empty'
 }
 
+select_service() {
+  local service_selection
+  echo
+  echo "Select the service whose logs you want to analyze:"
+  echo "1 - Nginx"
+  echo "2 - Apache"
+  echo "3 - SSH/authentication"
+  echo "4 - systemd journal"
+  echo "5 - HAProxy"
+  echo "6 - Docker"
+  echo "7 - Generic application log"
+  read -r service_selection
+
+  case "$service_selection" in
+  1)
+    SOURCE_TYPE=nginx
+    echo "Log file path (leave blank to auto-detect Nginx access logs):"
+    read -r INPUT_FILE
+    ;;
+  2)
+    SOURCE_TYPE=apache
+    echo "Apache log file path:"
+    read -r INPUT_FILE
+    ;;
+  3)
+    SOURCE_TYPE=ssh
+    echo "SSH/authentication log file path:"
+    read -r INPUT_FILE
+    ;;
+  4)
+    SOURCE_TYPE=systemd_journal
+    INPUT_FILE=
+    echo "Optional journalctl filters (for example: --unit ssh.service --since today):"
+    read -r JOURNALCTL_ARGS
+    ;;
+  5)
+    SOURCE_TYPE=haproxy
+    echo "HAProxy log file path:"
+    read -r INPUT_FILE
+    ;;
+  6)
+    SOURCE_TYPE=docker
+    echo "Docker JSON log file path:"
+    read -r INPUT_FILE
+    ;;
+  7)
+    SOURCE_TYPE=generic
+    echo "Application log file path:"
+    read -r INPUT_FILE
+    ;;
+  *)
+    echo "Invalid service selection." >&2
+    return 1
+    ;;
+  esac
+}
+
 send_notification() {
   local findings=$1
   local host_name=${HOSTNAME:-}
   if [[ -z "$host_name" ]]; then
     host_name=$(hostname 2>/dev/null || printf 'unknown-host')
   fi
-  if [[ -z "${BOGGER_EMAIL_RECIPIENT:-}" ]]; then
-    echo "Error: BOGGER_EMAIL_RECIPIENT is not configured" >&2
+  if [[ -z "${LAZER_EMAIL_RECIPIENT:-}" ]]; then
+    echo "Error: LAZER_EMAIL_RECIPIENT is not configured" >&2
     return 1
   fi
-  if [[ -z "${BOGGER_MAIL_COMMAND:-}" ]]; then
-    echo "Error: BOGGER_MAIL_COMMAND is not configured" >&2
+  if [[ -z "${LAZER_MAIL_COMMAND:-}" ]]; then
+    echo "Error: LAZER_MAIL_COMMAND is not configured" >&2
     return 1
   fi
-  printf '%s\n' "$findings" | "$BOGGER_MAIL_COMMAND" \
-    -s "Bogger anomaly detected on $host_name" "$BOGGER_EMAIL_RECIPIENT"
+  printf '%s\n' "$findings" | "$LAZER_MAIL_COMMAND" \
+    -s "Lazer anomaly detected on $host_name" "$LAZER_EMAIL_RECIPIENT"
 }
 
 service_analysis() {
@@ -375,74 +468,73 @@ service_analysis() {
 }
 
 setup() {
-  sudo mkdir -p /usr/share/bogger/systemd
-  sudo cp "$SCRIPT_DIR/bogger.sh" /usr/bin/bogger
-  sudo cp "$PARSER_FILE" /usr/share/bogger/parsers.sh
-  sudo cp "$SCRIPT_DIR/systemd/bogger.service" "$SCRIPT_DIR/systemd/bogger.timer" "$SCRIPT_DIR/systemd/bogger.env.example" /usr/share/bogger/systemd/
+  sudo mkdir -p /usr/share/lazer/systemd
+  sudo cp "$SCRIPT_DIR/lazer.sh" /usr/bin/lazer
+  sudo cp "$PARSER_FILE" /usr/share/lazer/parsers.sh
+  sudo cp "$SCRIPT_DIR/systemd/lazer.service" "$SCRIPT_DIR/systemd/lazer.timer" "$SCRIPT_DIR/systemd/lazer.env.example" /usr/share/lazer/systemd/
 }
 
 remove() {
-  if [[ -f /etc/systemd/system/bogger.timer ]]; then
-    sudo systemctl disable --now bogger.timer || true
+  if [[ -f /etc/systemd/system/lazer.timer ]]; then
+    sudo systemctl disable --now lazer.timer || true
   fi
-  sudo rm -f /etc/systemd/system/bogger.timer /etc/systemd/system/bogger.service
+  sudo rm -f /etc/systemd/system/lazer.timer /etc/systemd/system/lazer.service
   sudo systemctl daemon-reload
-  sudo rm /usr/bin/bogger
-  sudo rm -f /usr/share/bogger/parsers.sh
-  sudo rm -rf /usr/share/bogger
+  sudo rm /usr/bin/lazer
+  sudo rm -f /usr/share/lazer/parsers.sh
+  sudo rm -rf /usr/share/lazer
 }
 
 install_systemd_service() {
   local unit_source_dir="$SCRIPT_DIR/systemd"
   if [[ ! -d "$unit_source_dir" ]]; then
-    unit_source_dir="/usr/share/bogger/systemd"
+    unit_source_dir="/usr/share/lazer/systemd"
   fi
   if [[ ! -d "$unit_source_dir" ]]; then
     echo "Error: systemd templates are not available at '$unit_source_dir'" >&2
     return 1
   fi
-  sudo mkdir -p /etc/bogger
-  sudo cp "$SCRIPT_DIR/bogger.sh" /usr/bin/bogger
-  sudo cp "$PARSER_FILE" /usr/share/bogger/parsers.sh
-  sudo cp "$unit_source_dir/bogger.service" /etc/systemd/system/bogger.service
-  sudo cp "$unit_source_dir/bogger.timer" /etc/systemd/system/bogger.timer
-  if [[ ! -f /etc/bogger/bogger.env ]]; then
-    sudo cp "$unit_source_dir/bogger.env.example" /etc/bogger/bogger.env
-    sudo chmod 600 /etc/bogger/bogger.env
-    echo "Edit /etc/bogger/bogger.env before starting the timer."
+  sudo mkdir -p /etc/lazer
+  sudo cp "$SCRIPT_DIR/lazer.sh" /usr/bin/lazer
+  sudo cp "$PARSER_FILE" /usr/share/lazer/parsers.sh
+  sudo cp "$unit_source_dir/lazer.service" /etc/systemd/system/lazer.service
+  sudo cp "$unit_source_dir/lazer.timer" /etc/systemd/system/lazer.timer
+  if [[ ! -f /etc/lazer/lazer.env ]]; then
+    sudo cp "$unit_source_dir/lazer.env.example" /etc/lazer/lazer.env
+    sudo chmod 600 /etc/lazer/lazer.env
+    echo "Edit /etc/lazer/lazer.env before starting the timer."
   fi
   sudo systemctl daemon-reload
-  sudo systemctl enable --now bogger.timer
+  sudo systemctl enable --now lazer.timer
 }
 
 welcome() {
   echo "
-▀█████████▄   ▄██████▄     ▄██████▄     ▄██████▄     ▄████████    ▄████████ 
-  ███    ███ ███    ███   ███    ███   ███    ███   ███    ███   ███    ███ 
-  ███    ███ ███    ███   ███    █▀    ███    █▀    ███    █▀    ███    ███ 
- ▄███▄▄▄██▀  ███    ███  ▄███         ▄███         ▄███▄▄▄      ▄███▄▄▄▄██▀ 
-▀▀███▀▀▀██▄  ███    ███ ▀▀███ ████▄  ▀▀███ ████▄  ▀▀███▀▀▀     ▀▀███▀▀▀▀▀   
-  ███    ██▄ ███    ███   ███    ███   ███    ███   ███    █▄  ▀███████████ 
-  ███    ███ ███    ███   ███    ███   ███    ███   ███    ███   ███    ███ 
-▄█████████▀   ▀██████▀    ████████▀    ████████▀    ██████████   ███    ███ 
-                                                                 ███    ███
+
+██╗      █████╗ ███████╗███████╗██████╗ 
+██║     ██╔══██╗╚══███╔╝██╔════╝██╔══██╗
+██║     ███████║  ███╔╝ █████╗  ██████╔╝
+██║     ██╔══██║ ███╔╝  ██╔══╝  ██╔══██╗
+███████╗██║  ██║███████╗███████╗██║  ██║
+╚══════╝╚═╝  ╚═╝╚══════╝╚══════╝╚═╝  ╚═╝
+
 	"
   echo $'\n'$"Enter a selection from the folowing list..."
-  echo "1 - Install bogger to PATH"
-  echo "2 - Raw analysis"
-  echo "3 - Get a summary regarding the logs read"
+  echo "1 - Install lazer to PATH"
+  echo "2 - View local statistics (choose service)"
+  echo "3 - Run AI anomaly analysis (choose service)"
   echo "4 - Install systemd service to notify on anomalies"
-  echo "5 - Remove bogger from your system"
+  echo "5 - Remove lazer from your system"
   read -r selection
   case $selection in
   1)
     setup
     ;;
   2)
-    display
+    select_service && display
     ;;
   3)
-    analyse
+    select_service && analyse
     ;;
   4)
     install_systemd_service

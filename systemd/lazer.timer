@@ -1,10 +1,10 @@
 [Unit]
-Description=Run Bogger Nginx anomaly analysis hourly
+Description=Run Lazer Nginx anomaly analysis hourly
 
 [Timer]
 OnCalendar=hourly
 Persistent=true
-Unit=bogger.service
+Unit=lazer.service
 
 [Install]
 WantedBy=timers.target
