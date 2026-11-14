@@ -20,6 +20,7 @@ parse_http_line() {
   local source=$1
   local line=$2
   local ip timestamp method path protocol status bytes user_agent
+  local fields
   if [[ "$line" =~ ^([^[:space:]]+)[[:space:]]+[^[:space:]]+[[:space:]]+[^[:space:]]+[[:space:]]+\[([^]]+)\][[:space:]]+\"([A-Z]+)[[:space:]]+([^[:space:]]+)[[:space:]]+(HTTP/[0-9.]+)\"[[:space:]]+([0-9]{3})[[:space:]]+([^[:space:]]+)([[:space:]]+\"[^\"]*\")?[[:space:]]+\"([^\"]*)\" ]]; then
     ip=${BASH_REMATCH[1]}
     timestamp=${BASH_REMATCH[2]}
@@ -29,16 +30,16 @@ parse_http_line() {
     status=${BASH_REMATCH[6]}
     bytes=${BASH_REMATCH[7]}
     user_agent=${BASH_REMATCH[9]:-}
-    json_record "$timestamp" "$source" "$([[ "$status" -ge 500 ]] && echo error || echo info)" "$line" \
-      "$(jq -cn \
-        --arg ip "$ip" \
-        --arg method "$method" \
-        --arg path "$path" \
-        --arg protocol "$protocol" \
-        --arg status "$status" \
-        --arg bytes "$bytes" \
-        --arg user_agent "$user_agent" \
-        '{ip: $ip, method: $method, path: $path, protocol: $protocol, status: ($status | tonumber), bytes: $bytes, user_agent: $user_agent}')"
+    fields=$(jq -cn \
+      --arg ip "$ip" \
+      --arg method "$method" \
+      --arg path "$path" \
+      --arg protocol "$protocol" \
+      --arg status "$status" \
+      --arg bytes "$bytes" \
+      --arg user_agent "$user_agent" \
+      '{ip: $ip, method: $method, path: $path, protocol: $protocol, status: ($status | tonumber), bytes: $bytes, user_agent: $user_agent}')
+    json_record "$timestamp" "$source" "$([[ "$status" -ge 500 ]] && echo error || echo info)" "$line" "$fields"
     return 0
   fi
   return 1
@@ -48,6 +49,7 @@ parse_syslog_line() {
   local source=$1
   local line=$2
   local timestamp host process message severity
+  local fields
   if [[ "$line" =~ ^([A-Z][a-z]{2}[[:space:]]+[0-9]{1,2}[[:space:]]+[0-9:]{8})[[:space:]]+([^[:space:]]+)[[:space:]]+([^:]+):[[:space:]]+(.*)$ ]]; then
     timestamp=${BASH_REMATCH[1]}
     host=${BASH_REMATCH[2]}
@@ -55,10 +57,10 @@ parse_syslog_line() {
     message=${BASH_REMATCH[4]}
     severity=info
     [[ "$message" =~ (failed|failure|error|invalid|attack|denied) ]] && severity=warning
-    json_record "$timestamp" "$source" "$severity" "$line" \
-      "$(jq -cn --arg host "$host" --arg process "$process" --arg message "$message" '
-        {ip: (if ($message | capture("(?<ip>[0-9]{1,3}(\\.[0-9]{1,3}){3})")?) then ($message | capture("(?<ip>[0-9]{1,3}(\\.[0-9]{1,3}){3})").ip) else "N/A" end),
-         path: "N/A", status: null, user_agent: "N/A", host: $host, process: $process}')"
+    fields=$(jq -cn --arg host "$host" --arg process "$process" --arg message "$message" '
+      {ip: (if ($message | capture("(?<ip>[0-9]{1,3}(\\.[0-9]{1,3}){3})")?) then ($message | capture("(?<ip>[0-9]{1,3}(\\.[0-9]{1,3}){3})").ip) else "N/A" end),
+       path: "N/A", status: null, user_agent: "N/A", host: $host, process: $process}')
+    json_record "$timestamp" "$source" "$severity" "$line" "$fields"
     return 0
   fi
   return 1
@@ -83,6 +85,7 @@ parse_docker_line() {
 parse_haproxy_line() {
   local line=$1
   local ip status request method path protocol timestamp
+  local fields
   if [[ "$line" =~ ^([A-Z][a-z]{2}[[:space:]]+[0-9]{1,2}[[:space:]]+[0-9:]{8})[[:space:]]+ ]]; then
     timestamp=${BASH_REMATCH[1]}
   else
@@ -95,14 +98,14 @@ parse_haproxy_line() {
     method=${BASH_REMATCH[1]}
     path=${BASH_REMATCH[2]}
     protocol=${BASH_REMATCH[3]}
-    json_record "$timestamp" haproxy "$([[ "$status" -ge 500 ]] && echo error || echo info)" "$line" \
-      "$(jq -cn \
-        --arg ip "$ip" \
-        --arg method "$method" \
-        --arg path "$path" \
-        --arg protocol "$protocol" \
-        --arg status "$status" \
-        '{ip: $ip, method: $method, path: $path, protocol: $protocol, status: ($status | tonumber), bytes: "N/A", user_agent: "N/A"}')"
+    fields=$(jq -cn \
+      --arg ip "$ip" \
+      --arg method "$method" \
+      --arg path "$path" \
+      --arg protocol "$protocol" \
+      --arg status "$status" \
+      '{ip: $ip, method: $method, path: $path, protocol: $protocol, status: ($status | tonumber), bytes: "N/A", user_agent: "N/A"}')
+    json_record "$timestamp" haproxy "$([[ "$status" -ge 500 ]] && echo error || echo info)" "$line" "$fields"
     return 0
   fi
   return 1
