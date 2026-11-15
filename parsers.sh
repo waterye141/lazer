@@ -272,11 +272,18 @@ parse_input_to_records() {
       echo "Error: journalctl is required for systemd_journal input" >&2
       return 1
     fi
+    if [[ ! "${JOURNALCTL_LINES:-1000}" =~ ^[1-9][0-9]*$ ]]; then
+      echo "Error: LAZER_JOURNAL_LINES must be a positive integer" >&2
+      return 1
+    fi
     local -a journal_args=()
-    if [[ -n "${JOURNALCTL_ARGS:-}" ]]; then
+    if [[ -n "${JOURNALCTL_ARGV+x}" ]]; then
+      journal_args=("${JOURNALCTL_ARGV[@]}")
+    fi
+    if ((${#journal_args[@]} == 0)) && [[ -n "${JOURNALCTL_ARGS:-}" ]]; then
       read -r -a journal_args <<<"$JOURNALCTL_ARGS"
     fi
-    if ! journalctl --no-pager -o json "${journal_args[@]}" >"$output_file"; then
+    if ! journalctl --no-pager -o json -n "${JOURNALCTL_LINES:-1000}" "${journal_args[@]}" >"$output_file"; then
       echo "Error: journalctl could not read the requested input" >&2
       return 1
     fi

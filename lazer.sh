@@ -13,6 +13,8 @@ SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 SOURCE_TYPE=${LAZER_SOURCE:-}
 INPUT_FILE=${LAZER_INPUT_FILE:-}
 JOURNALCTL_ARGS=${LAZER_JOURNALCTL_ARGS:-}
+JOURNALCTL_ARGV=()
+JOURNALCTL_LINES=${LAZER_JOURNAL_LINES:-1000}
 RECORDS_FILE=
 CLI_SOURCE=
 CLI_INPUT_FILE=
@@ -101,6 +103,7 @@ load_configuration() {
   fi
   SOURCE_TYPE=${LAZER_SOURCE:-$SOURCE_TYPE}
   INPUT_FILE=${LAZER_INPUT_FILE:-${LOG_FILE:-$INPUT_FILE}}
+  JOURNALCTL_LINES=${LAZER_JOURNAL_LINES:-$JOURNALCTL_LINES}
   OPENROUTER_MODEL=${OPENROUTER_MODEL:-openrouter/free}
   GROQ_MODEL=${GROQ_MODEL:-openai/gpt-oss-120b}
   OPENROUTER_API_URL=${OPENROUTER_API_URL:-https://openrouter.ai/api/v1/chat/completions}
@@ -141,17 +144,17 @@ parse_cli_arguments() {
       ;;
     --unit)
       require_option_value "--unit" "${2:-}" || return 1
-      JOURNALCTL_ARGS+=" -u ${2:-}"
+      JOURNALCTL_ARGV+=("--unit" "${2:-}")
       shift 2
       ;;
     --since)
       require_option_value "--since" "${2:-}" || return 1
-      JOURNALCTL_ARGS+=" --since ${2:-}"
+      JOURNALCTL_ARGV+=("--since" "${2:-}")
       shift 2
       ;;
     --until)
       require_option_value "--until" "${2:-}" || return 1
-      JOURNALCTL_ARGS+=" --until ${2:-}"
+      JOURNALCTL_ARGV+=("--until" "${2:-}")
       shift 2
       ;;
     --help)
@@ -160,6 +163,7 @@ Usage: lazer.sh [--stats|--analyze] [--service] [--source SOURCE] [--file PATH]
 
 Sources: nginx, apache, ssh, systemd_journal, haproxy, docker, generic
 Journal options: --unit UNIT, --since TIME, --until TIME
+Journal input defaults to the latest 1000 records; override with LAZER_JOURNAL_LINES.
 Actions: --stats for local statistics, --analyze for AI anomaly analysis
 EOF
       exit 0

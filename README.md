@@ -176,6 +176,8 @@ Other useful filters include `--until`, for example:
 ./lazer.sh --source systemd_journal --since yesterday --until today
 ```
 
+Without a limit, `journalctl` may scan and serialize the entire persistent journal. On a busy or long-lived host, that can produce a very large sequence of newline-delimited JSON journal entries and make Lazer appear stuck while it is still reading and parsing records. Lazer therefore reads the latest 1000 journal entries by default; set `LAZER_JOURNAL_LINES` to another positive limit when needed. CLI filter values remain single arguments, including values such as `--since "5 minutes ago"`.
+
 ### HAProxy
 
 ```bash
