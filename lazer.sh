@@ -20,6 +20,8 @@ CLI_INPUT_SELECTION=0
 CLI_ACTION=
 PARSER_FILE="$SCRIPT_DIR/parsers.sh"
 [[ -f "$PARSER_FILE" ]] || PARSER_FILE="/usr/share/lazer/parsers.sh"
+COMPLETION_DIR="$SCRIPT_DIR/completions"
+[[ -d "$COMPLETION_DIR" ]] || COMPLETION_DIR="/usr/share/lazer/completions"
 
 error() {
   echo "Error: $*" >&2
@@ -94,6 +96,7 @@ load_configuration() {
   fi
 
   if [[ -f "$SERVICE_ENV_FILE" ]]; then
+    # shellcheck disable=SC1090
     source "$SERVICE_ENV_FILE"
   fi
   SOURCE_TYPE=${LAZER_SOURCE:-$SOURCE_TYPE}
@@ -283,6 +286,80 @@ stats_summary() {
   printf "\n"
 }
 
+print_record_group() {
+  local records_file=$1
+  local count=$2
+  local label=$3
+  local expression=$4
+  local suffix=$5
+  echo "$label:"
+  jq -sr --argjson count "$count" "$expression
+    | group_by(.)
+    | map({name: .[0], count: length})
+    | sort_by(-.count)
+    | .[:\$count][]
+    | \"\\(.name) - \\(.count) $suffix\"
+  " "$records_file"
+}
+
+specialized_summary() {
+  local records_file=$1
+  local count=$2
+
+  case "$SOURCE_TYPE" in
+  nginx|apache)
+    echo -e "\nHTTP-specific indicators:"
+    print_record_group "$records_file" "$count" "Status classes" '[.[] | .fields.status_class? // "N/A"]' "responses"
+    print_record_group "$records_file" "$count" "Methods" '[.[] | .fields.method? // "N/A"]' "requests"
+    print_record_group "$records_file" "$count" "Referrers" '[.[] | .fields.referrer? // "N/A"]' "requests"
+    ;;
+  docker)
+    echo -e "\nDocker-specific indicators:"
+    print_record_group "$records_file" "$count" "Streams" '[.[] | .fields.stream? // "N/A"]' "records"
+    print_record_group "$records_file" "$count" "Events" '[.[] | .fields.event? // "N/A"]' "events"
+    print_record_group "$records_file" "$count" "Status classes" '[.[] | .fields.status_class? // "N/A"]' "records"
+    if [[ -n "${LAZER_DOCKER_CONTAINER:-}" ]]; then
+      echo "Docker runtime metadata:"
+      if command -v docker >/dev/null 2>&1; then
+        if ! docker inspect --format 'name={{.Name}} image={{.Config.Image}} status={{.State.Status}} restart_count={{.RestartCount}}' "$LAZER_DOCKER_CONTAINER" 2>/dev/null; then
+          echo "runtime metadata unavailable for '$LAZER_DOCKER_CONTAINER'"
+        fi
+        if ! docker stats --no-stream --format 'cpu={{.CPUPerc}} memory={{.MemUsage}} memory_percent={{.MemPerc}} network={{.NetIO}} block_io={{.BlockIO}} pids={{.PIDs}}' "$LAZER_DOCKER_CONTAINER" 2>/dev/null; then
+          echo "runtime statistics unavailable for '$LAZER_DOCKER_CONTAINER'"
+        fi
+      else
+        echo "docker CLI is unavailable; showing log data only"
+      fi
+    fi
+    ;;
+  ssh)
+    echo -e "\nSSH/authentication indicators:"
+    print_record_group "$records_file" "$count" "Events" '[.[] | .fields.event? // "N/A"]' "records"
+    print_record_group "$records_file" "$count" "Usernames" '[.[] | .fields.username? // "N/A"]' "attempts"
+    print_record_group "$records_file" "$count" "Source IPs" '[.[] | .fields.ip? // "N/A"]' "attempts"
+    ;;
+  systemd_journal)
+    echo -e "\nsystemd journal indicators:"
+    print_record_group "$records_file" "$count" "Units" '[.[] | .fields.unit? // "N/A"]' "records"
+    print_record_group "$records_file" "$count" "Events" '[.[] | .fields.event? // "N/A"]' "events"
+    print_record_group "$records_file" "$count" "Severities" '[.[] | .severity]' "records"
+    ;;
+  haproxy)
+    echo -e "\nHAProxy indicators:"
+    print_record_group "$records_file" "$count" "Backends" '[.[] | .fields.backend? // "N/A"]' "requests"
+    print_record_group "$records_file" "$count" "Termination states" '[.[] | .fields.termination_state? // "N/A"]' "requests"
+    print_record_group "$records_file" "$count" "Statuses" '[.[] | .fields.status? // "N/A"]' "responses"
+    ;;
+  generic)
+    echo -e "\nApplication log indicators:"
+    jq -sr --argjson count "$count" '
+      [.[] | .severity] | group_by(.) | map({name: .[0], count: length}) |
+      sort_by(-.count) | .[:$count][] | "\(.name) - \(.count) records"
+    ' "$records_file"
+    ;;
+  esac
+}
+
 display() {
   resolve_input
   echo "How many lines do you want to display?:"
@@ -293,9 +370,14 @@ display() {
   clear
   if [[ "$SOURCE_TYPE" == nginx ]]; then
     stats_summary "$INPUT_FILE" "$COUNT"
+    prepare_records
+    specialized_summary "$RECORDS_FILE" "$COUNT"
+    rm -f "$RECORDS_FILE"
+    RECORDS_FILE=
   else
     prepare_records
     stats_summary "$RECORDS_FILE" "$COUNT"
+    specialized_summary "$RECORDS_FILE" "$COUNT"
     rm -f "$RECORDS_FILE"
     RECORDS_FILE=
   fi
@@ -384,10 +466,13 @@ request_analysis() {
   local recent_lines
   if [[ "$SOURCE_TYPE" == nginx ]]; then
     summary=$(stats_summary "$INPUT_FILE" 10)
+    prepare_records
+    summary+=$'\n'"$(specialized_summary "$RECORDS_FILE" 10)"
     recent_lines=$(tail -n 30 "$INPUT_FILE")
   else
     prepare_records
     summary=$(stats_summary "$RECORDS_FILE" 10)
+    summary+=$'\n'"$(specialized_summary "$RECORDS_FILE" 10)"
     recent_lines=$(tail -n 30 "$RECORDS_FILE")
   fi
   local system_prompt='Analyze server log records for anomalies. Return only valid JSON with this schema: {"anomaly": boolean, "findings": string}. Set anomaly to true only when the records contain a meaningful anomaly.'
@@ -559,9 +644,17 @@ service_analysis() {
 }
 
 setup() {
-  sudo mkdir -p /usr/share/lazer/systemd
+  if [[ ! -f "$COMPLETION_DIR/lazer.bash" || ! -f "$COMPLETION_DIR/_lazer" ]]; then
+    echo "Error: shell completion files are not available at '$COMPLETION_DIR'" >&2
+    return 1
+  fi
+  sudo mkdir -p /usr/share/lazer/systemd /usr/share/lazer/completions \
+    /etc/bash_completion.d /usr/share/zsh/site-functions
   sudo cp "$SCRIPT_DIR/lazer.sh" /usr/bin/lazer
   sudo cp "$PARSER_FILE" /usr/share/lazer/parsers.sh
+  sudo cp "$COMPLETION_DIR/lazer.bash" /etc/bash_completion.d/lazer
+  sudo cp "$COMPLETION_DIR/_lazer" /usr/share/zsh/site-functions/_lazer
+  sudo cp "$COMPLETION_DIR/lazer.bash" "$COMPLETION_DIR/_lazer" /usr/share/lazer/completions/
   sudo cp "$SCRIPT_DIR/systemd/lazer.service" "$SCRIPT_DIR/systemd/lazer.timer" "$SCRIPT_DIR/systemd/lazer.env.example" /usr/share/lazer/systemd/
 }
 
@@ -572,6 +665,7 @@ remove() {
   sudo rm -f /etc/systemd/system/lazer.timer /etc/systemd/system/lazer.service
   sudo systemctl daemon-reload
   sudo rm /usr/bin/lazer
+  sudo rm -f /etc/bash_completion.d/lazer /usr/share/zsh/site-functions/_lazer
   sudo rm -f /usr/share/lazer/parsers.sh
   sudo rm -rf /usr/share/lazer
 }
@@ -585,9 +679,17 @@ install_systemd_service() {
     echo "Error: systemd templates are not available at '$unit_source_dir'" >&2
     return 1
   fi
+  if [[ ! -f "$COMPLETION_DIR/lazer.bash" || ! -f "$COMPLETION_DIR/_lazer" ]]; then
+    echo "Error: shell completion files are not available at '$COMPLETION_DIR'" >&2
+    return 1
+  fi
   sudo mkdir -p /etc/lazer
+  sudo mkdir -p /usr/share/lazer/completions /etc/bash_completion.d /usr/share/zsh/site-functions
   sudo cp "$SCRIPT_DIR/lazer.sh" /usr/bin/lazer
   sudo cp "$PARSER_FILE" /usr/share/lazer/parsers.sh
+  sudo cp "$COMPLETION_DIR/lazer.bash" /etc/bash_completion.d/lazer
+  sudo cp "$COMPLETION_DIR/_lazer" /usr/share/zsh/site-functions/_lazer
+  sudo cp "$COMPLETION_DIR/lazer.bash" "$COMPLETION_DIR/_lazer" /usr/share/lazer/completions/
   sudo cp "$unit_source_dir/lazer.service" /etc/systemd/system/lazer.service
   sudo cp "$unit_source_dir/lazer.timer" /etc/systemd/system/lazer.timer
   if [[ ! -f /etc/lazer/lazer.env ]]; then

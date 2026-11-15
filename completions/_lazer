@@ -1,0 +1,16 @@
+#compdef lazer lazer.sh
+
+_lazer() {
+  _arguments -s \
+    '(-h --help)'{-h,--help}'[Show usage information]' \
+    '(-s --stats)'--stats'[Run local statistics]' \
+    '(-a --analyze)'--analyze'[Run AI anomaly analysis]' \
+    '--service[Run once without prompts using service configuration]' \
+    '--source[Select the log source]:source:(nginx apache ssh systemd_journal haproxy docker generic)' \
+    '--file[Select a log file]:log file:_files' \
+    '--unit[Restrict journal input to a systemd unit]:unit name:' \
+    '--since[Restrict journal input to a start time]:time:(today yesterday now)' \
+    '--until[Restrict journal input to an end time]:time:(today yesterday now)'
+}
+
+_lazer "$@"

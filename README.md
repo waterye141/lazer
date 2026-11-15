@@ -87,6 +87,33 @@ Available flags:
 
 When `--source` or `--file` is supplied without `--stats` or `--analyze`, Lazer displays a two-option prompt for local statistics or AI analysis and then dispatches the selected parser. If neither action flag nor source/file arguments are supplied, the full installation and service menu is shown. `systemd_journal` requires an explicit `--stats` or `--analyze` action.
 
+### Shell completion
+
+Menu option `1` installs system-wide Bash and Zsh completions:
+
+- Bash: `/etc/bash_completion.d/lazer`
+- Zsh: `/usr/share/zsh/site-functions/_lazer`
+
+Start a new shell, or reload the completion file in an existing Bash session:
+
+```bash
+source /etc/bash_completion.d/lazer
+```
+
+The completions cover actions, flags, supported source names, common journal time values, and filesystem paths after `--file`. For a checkout without installing Lazer, load the Bash completion manually:
+
+```bash
+source completions/lazer.bash
+```
+
+Zsh users can load the checkout completion by adding the repository's `completions` directory to `fpath` and autoloading `_lazer`:
+
+```zsh
+fpath=(./completions $fpath)
+autoload -Uz _lazer
+compinit
+```
+
 Examples:
 
 ```bash
@@ -163,6 +190,8 @@ Select a Docker JSON log file:
 ./lazer.sh --source docker --file /var/lib/docker/containers/CONTAINER_ID/CONTAINER_ID-json.log
 ```
 
+Docker reports include stdout/stderr streams, application severity, lifecycle/health/dependency/OOM signals, and HTTP method/path/status fields when the message contains an HTTP access line. To include optional runtime metadata such as image, restart count, CPU, memory, network I/O, block I/O, and PID count, set `LAZER_DOCKER_CONTAINER` to a container name or ID. The Docker CLI is optional; log parsing continues without it.
+
 ### Generic logs
 
 Use the generic parser for timestamped or plain-text application logs:
@@ -170,6 +199,19 @@ Use the generic parser for timestamped or plain-text application logs:
 ```bash
 ./lazer.sh --source generic --file /var/log/my-service/application.log
 ```
+
+## Source-specific analysis
+
+Reports retain the common source, severity, client, path, status, and user-agent sections and add specialized indicators:
+
+- **Nginx/Apache:** status classes, HTTP methods, referrers, and request-focused error concentration.
+- **SSH/authentication:** authentication outcomes, usernames, source IPs, ports, and privilege-use events.
+- **systemd journal:** units, severity distribution, and failure, OOM, and lifecycle signals.
+- **HAProxy:** backend concentration, HTTP statuses, and termination states.
+- **Docker:** streams, lifecycle/health/dependency/OOM events, HTTP fields, and optional runtime metadata.
+- **Generic:** severity distribution and detected error concentration.
+
+The specialized fields are also included in AI analysis context. Docker json-file logs are daemon-managed files; avoid modifying them directly while Docker is running.
 
 ## AI analysis and provider fallback
 
