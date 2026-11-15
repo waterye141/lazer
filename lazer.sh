@@ -20,6 +20,31 @@ CLI_INPUT_SELECTION=0
 CLI_ACTION=
 PARSER_FILE="$SCRIPT_DIR/parsers.sh"
 [[ -f "$PARSER_FILE" ]] || PARSER_FILE="/usr/share/lazer/parsers.sh"
+
+error() {
+  echo "Error: $*" >&2
+  return 1
+}
+
+require_option_value() {
+  local option=$1
+  local value=${2:-}
+  if [[ -z "$value" || "$value" == --* ]]; then
+    error "$option requires a value"
+    return 1
+  fi
+}
+
+validate_source() {
+  case "$1" in
+  nginx|apache|ssh|systemd_journal|haproxy|docker|generic)
+    ;;
+  *)
+    error "unsupported source '$1'; choose nginx, apache, ssh, systemd_journal, haproxy, docker, or generic"
+    return 1
+    ;;
+  esac
+}
 # shellcheck disable=SC1090
 source "$PARSER_FILE"
 if [[ "${1:-}" == "--service" ]]; then
@@ -100,24 +125,29 @@ parse_cli_arguments() {
       shift
       ;;
     --source)
+      require_option_value "--source" "${2:-}" || return 1
       CLI_SOURCE=${2:-}
       CLI_INPUT_SELECTION=1
       shift 2
       ;;
     --file)
+      require_option_value "--file" "${2:-}" || return 1
       CLI_INPUT_FILE=${2:-}
       CLI_INPUT_SELECTION=1
       shift 2
       ;;
     --unit)
+      require_option_value "--unit" "${2:-}" || return 1
       JOURNALCTL_ARGS+=" -u ${2:-}"
       shift 2
       ;;
     --since)
+      require_option_value "--since" "${2:-}" || return 1
       JOURNALCTL_ARGS+=" --since ${2:-}"
       shift 2
       ;;
     --until)
+      require_option_value "--until" "${2:-}" || return 1
       JOURNALCTL_ARGS+=" --until ${2:-}"
       shift 2
       ;;
@@ -138,11 +168,17 @@ EOF
     esac
   done
   if [[ -n "$CLI_SOURCE" ]]; then
+    validate_source "$CLI_SOURCE" || return 1
     SOURCE_TYPE=$CLI_SOURCE
   fi
   if [[ -n "$CLI_INPUT_FILE" ]]; then
     INPUT_FILE=$CLI_INPUT_FILE
   fi
+  if [[ "$SOURCE_TYPE" == systemd_journal && -n "$CLI_INPUT_FILE" ]]; then
+    error "--file cannot be used with systemd_journal"
+    return 1
+  fi
+  validate_source "$SOURCE_TYPE" || return 1
 }
 
 resolve_input() {
@@ -166,11 +202,14 @@ resolve_input() {
       exit 1
     fi
     echo $'\n'"Log file not found, please provide the $SOURCE_TYPE log file path: "
-    read -r INPUT_FILE
+    if ! read -r INPUT_FILE || [[ -z "$INPUT_FILE" ]]; then
+      error "a log file path is required"
+      exit 1
+    fi
   fi
 
   if [[ ! -f "$INPUT_FILE" ]]; then
-    echo "Error: $SOURCE_TYPE log not found at '$INPUT_FILE'" >&2
+    error "$SOURCE_TYPE log not found at '$INPUT_FILE'"
     echo "Usage: $0 --source $SOURCE_TYPE --file /path/to/log" >&2
     exit 1
   fi
@@ -247,7 +286,10 @@ stats_summary() {
 display() {
   resolve_input
   echo "How many lines do you want to display?:"
-  read -r COUNT
+  if ! read -r COUNT || [[ ! "$COUNT" =~ ^[1-9][0-9]*$ ]]; then
+    error "the number of results must be a positive integer"
+    return 1
+  fi
   clear
   if [[ "$SOURCE_TYPE" == nginx ]]; then
     stats_summary "$INPUT_FILE" "$COUNT"
@@ -402,7 +444,10 @@ select_action() {
   echo "Choose an action:"
   echo "1 - View local statistics"
   echo "2 - Run AI anomaly analysis"
-  read -r action_selection
+  if ! read -r action_selection; then
+    error "an action selection is required"
+    return 1
+  fi
   case "$action_selection" in
   1)
     CLI_ACTION=stats
@@ -428,7 +473,10 @@ select_service() {
   echo "5 - HAProxy"
   echo "6 - Docker"
   echo "7 - Generic application log"
-  read -r service_selection
+  if ! read -r service_selection; then
+    error "a service selection is required"
+    return 1
+  fi
 
   case "$service_selection" in
   1)
@@ -568,7 +616,10 @@ welcome() {
   echo "3 - Run AI anomaly analysis (choose service)"
   echo "4 - Install systemd service to notify on anomalies"
   echo "5 - Remove lazer from your system"
-  read -r selection
+  if ! read -r selection; then
+    error "a menu selection is required"
+    return 1
+  fi
   case $selection in
   1)
     setup
